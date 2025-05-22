@@ -1,0 +1,792 @@
+type ButtonBytes = [number, number, number, number];
+
+type ReportRate = 125 | 250 | 500 | 1000;
+type DpiProfileIndex = 0 | 1 | 2 | 3 | 4 | 5;
+type SleepValue = 0x01 | 0x02 | 0x03 | 0x04 | 0x05 | 0x06 | 0x07 | 0x08 | 0x09;
+type Effect =
+  | 0x01
+  | 0x02
+  | 0x03
+  | 0x04
+  | 0x05
+  | 0x06
+  | 0x07
+  | 0x08
+  | 0x09
+  | 0x0a;
+
+interface DpiProfile {
+  dpi: number;
+  enabled: 0x00 | 0x01;
+}
+
+interface LightingConfig {
+  red: number;
+  green: number;
+  blue: number;
+  brightness: number;
+  speed: number;
+}
+
+interface KreoDeviceConfig {
+  // Packet 1
+  reportRate: 0x01 | 0x02 | 0x04 | 0x08;
+  activeDpiProfile: DpiProfileIndex;
+  sleepValue: SleepValue;
+  moveLightOff: 0x00 | 0xff;
+  activeEffect: Effect;
+
+  // Packet 2 - Buttons
+  buttons: {
+    left: ButtonBytes;
+    right: ButtonBytes;
+    middle: ButtonBytes;
+    forward: ButtonBytes;
+    back: ButtonBytes;
+    dpi: ButtonBytes;
+  };
+
+  // Packet 3 - DPI Profiles
+  dpiProfiles: DpiProfile[];
+
+  // Packet 4 - Lighting
+  lighting: LightingConfig;
+}
+
+const VALID_BUTTON_BINDINGS: number[][] = [
+  [0x00], // Off
+
+  // Simple Buttons
+  [0x81], // Left
+  [0x82], // Right
+  [0x83], // Middle
+  [0x84], // Back
+  [0x85], // Forward
+
+  // DPI
+  [0x88], // DPI Switch
+  [0x89], // DPI -
+  [0x8a], // DPI +
+
+  // Media
+  [0x8e, 0x01, 0xcd], // Play/Pause
+  [0x8e, 0x01, 0xb7], // Stop
+  [0x8e, 0x01, 0xb6], // Prev
+  [0x8e, 0x01, 0xb5], // Next
+  [0x8e, 0x01, 0xe9], // Vol Up
+  [0x8e, 0x01, 0xea], // Vol Down
+  [0x8e, 0x01, 0xe2], // Mute
+  [0x8e, 0x01, 0x83, 0x01], // Media Player
+
+  // Basic
+  [0x8f, 0x01, 0x1b], // Cut
+  [0x8f, 0x01, 0x06], // Copy
+  [0x8f, 0x01, 0x19], // Paste
+  [0x8f, 0x01, 0x04], // All
+  [0x8f, 0x01, 0x09], // Find
+  [0x8f, 0x01, 0x11], // New
+  [0x8f, 0x01, 0x13], // Print
+  [0x8f, 0x01, 0x16], // Save
+
+  // Windows
+  [0x8f, 0x08, 0x0f], // Lock PC
+
+  // Polling Rate
+  [0x97], // Rate +
+  [0x97, 0x01], // Rate Switch
+  [0x98], // Rate -
+
+  // LED
+  [0x9b, 0x08], // LED Mode Switch
+];
+
+const rateMap = {
+  125: 0x08,
+  250: 0x04,
+  500: 0x02,
+  1000: 0x01,
+} as const;
+
+// -------------------------------------
+// CLASS
+// -------------------------------------
+
+export class KreoDevice {
+  private _device: HIDDevice;
+
+  constructor(device: HIDDevice) {
+    this._device = device;
+    this._device.addEventListener("inputreport", this.handleInputReport);
+  }
+
+  private _modifiedKeys = new Set<string>();
+
+  private responseQueue: DataView[] = [];
+  private responseResolvers: ((value: DataView) => void)[] = [];
+
+  private config: KreoDeviceConfig = {
+    reportRate: 0x01,
+    activeDpiProfile: 0x00,
+    sleepValue: 0x01,
+    moveLightOff: 0x00,
+    activeEffect: 0x02,
+
+    buttons: {
+      left: [0x81, 0x00, 0x00, 0x00],
+      right: [0x82, 0x00, 0x00, 0x00],
+      middle: [0x83, 0x00, 0x00, 0x00],
+      forward: [0x85, 0x00, 0x00, 0x00],
+      back: [0x84, 0x00, 0x00, 0x00],
+      dpi: [0x88, 0x00, 0x00, 0x00],
+    },
+
+    dpiProfiles: [
+      { dpi: 0x0007, enabled: 0x01 },
+      { dpi: 0x000f, enabled: 0x01 },
+      { dpi: 0x001f, enabled: 0x01 },
+      { dpi: 0x002f, enabled: 0x01 },
+      { dpi: 0x003f, enabled: 0x01 },
+      { dpi: 0x007f, enabled: 0x01 },
+    ],
+
+    lighting: {
+      red: 0xff,
+      green: 0x00,
+      blue: 0x00,
+      brightness: 0x03,
+      speed: 0x05,
+    },
+  };
+
+  // -------------------------------------
+  // Setter Getter functions (incomplete)
+  // -------------------------------------
+
+  public get device() {
+    return this._device;
+  }
+
+  // Packet 1
+  set reportRate(value: ReportRate) {
+    if (!(value in rateMap)) {
+      throw new Error("Invalid report rate");
+    }
+    this.config.reportRate = rateMap[value];
+    this._modifiedKeys.add("reportRate");
+  }
+  get reportRate(): ReportRate {
+    const reverseMap = Object.entries(rateMap).find(
+      ([, v]) => v === this.config.reportRate,
+    );
+    return Number(reverseMap?.[0]) as ReportRate;
+  }
+
+  set activeDpiProfile(value: number) {
+    this.config.activeDpiProfile = this.clamp(value, 0x00, 0x05) as
+      | 0x00
+      | 0x01
+      | 0x02
+      | 0x03
+      | 0x04
+      | 0x05;
+    this._modifiedKeys.add("activeDpiProfile");
+  }
+  get activeDpiProfile() {
+    return this.config.activeDpiProfile;
+  }
+
+  set sleepValue(value: SleepValue) {
+    this.config.sleepValue = this.clamp(value, 0x01, 0x09) as
+      | 0x01
+      | 0x02
+      | 0x03
+      | 0x04
+      | 0x05
+      | 0x06
+      | 0x07
+      | 0x08
+      | 0x09;
+    this._modifiedKeys.add("sleepValue");
+  }
+  get sleepValue() {
+    return this.config.sleepValue;
+  }
+
+  set moveLightOff(value: boolean) {
+    this.config.moveLightOff = value ? 0xff : 0x00;
+    this._modifiedKeys.add("moveLightOff");
+  }
+  get moveLightOff() {
+    return this.config.moveLightOff === 0xff;
+  }
+
+  set activeEffect(value: Effect) {
+    this.config.activeEffect = this.clamp(value, 0x01, 0x0a) as
+      | 0x01
+      | 0x02
+      | 0x03
+      | 0x04
+      | 0x05
+      | 0x06
+      | 0x07
+      | 0x08
+      | 0x09
+      | 0x0a;
+    this._modifiedKeys.add("activeEffect");
+  }
+  get activeEffect() {
+    return this.config.activeEffect;
+  }
+
+  // Packet 2
+  set leftButton(value: number[]) {
+    this.setButton("left", value);
+    this._modifiedKeys.add("left");
+  }
+  get leftButton() {
+    return this.config.buttons.left;
+  }
+
+  set rightButton(value: number[]) {
+    this.setButton("right", value);
+    this._modifiedKeys.add("right");
+  }
+  get rightButton() {
+    return this.config.buttons.right;
+  }
+
+  set middleButton(value: number[]) {
+    this.setButton("middle", value);
+    this._modifiedKeys.add("middle");
+  }
+  get middleButton() {
+    return this.config.buttons.middle;
+  }
+
+  set backButton(value: number[]) {
+    this.setButton("back", value);
+    this._modifiedKeys.add("back");
+  }
+  get backButton() {
+    return this.config.buttons.back;
+  }
+
+  set forwardButton(value: number[]) {
+    this.setButton("forward", value);
+    this._modifiedKeys.add("forward");
+  }
+  get forwardButton() {
+    return this.config.buttons.forward;
+  }
+
+  set dpiButton(value: number[]) {
+    this.setButton("dpi", value);
+    this._modifiedKeys.add("dpi");
+  }
+  get dpiButton() {
+    return this.config.buttons.dpi;
+  }
+
+  private setButton(
+    field: keyof typeof this.config.buttons,
+    value: number[],
+  ): void {
+    if (this.isValidButtonBinding(value)) {
+      this.config.buttons[field] = [...value, 0x00, 0x00, 0x00, 0x00].slice(
+        0,
+        4,
+      ) as ButtonBytes;
+    } else {
+      throw new Error(`Invalid DPI button binding value`);
+    }
+  }
+
+  private isValidButtonBinding(input: number[]): boolean {
+    const paddedInput = [...input];
+    while (paddedInput.length < 4) paddedInput.push(0x00);
+
+    return VALID_BUTTON_BINDINGS.some((valid) => {
+      const paddedValid = [...valid];
+      while (paddedValid.length < 4) paddedValid.push(0x00);
+      return paddedInput.every((v, i) => v === paddedValid[i]);
+    });
+  }
+
+  // Packet 3
+  setDpiProfile(index: DpiProfileIndex, dpi: number, enabled: boolean) {
+    const clampedIndex = this.clamp(
+      index,
+      0,
+      this.config.dpiProfiles.length - 1,
+    );
+    const internalDpi = Math.floor(this.clamp(dpi, 50, 26000) / 50 - 1);
+
+    this.config.dpiProfiles[clampedIndex] = {
+      dpi: internalDpi,
+      enabled: enabled ? 0x01 : 0x00,
+    };
+    this._modifiedKeys.add("dpiProfiles");
+  }
+  getDpiProfile(index: DpiProfileIndex): { dpi: number; enabled: boolean } {
+    const profile = this.config.dpiProfiles[index];
+    return {
+      dpi: (profile.dpi + 1) * 50,
+      enabled: profile.enabled === 0x01,
+    };
+  }
+
+  // Packet 4
+  private setLightingComponent<K extends keyof LightingConfig>(
+    key: K,
+    value: number,
+    min: number,
+    max: number,
+  ): void {
+    this.config.lighting[key] = this.clamp(value, min, max);
+    this._modifiedKeys.add(key);
+  }
+
+  set red(value: number) {
+    this.setLightingComponent("red", value, 0x00, 0xff);
+  }
+  get red(): number {
+    return this.config.lighting.red;
+  }
+
+  set green(value: number) {
+    this.setLightingComponent("green", value, 0x00, 0xff);
+  }
+  get green(): number {
+    return this.config.lighting.green;
+  }
+
+  set blue(value: number) {
+    this.setLightingComponent("blue", value, 0x00, 0xff);
+  }
+  get blue(): number {
+    return this.config.lighting.blue;
+  }
+
+  set color(value: string) {
+    const match = value.match(
+      /^rgba?\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})(?:,\s*([01](?:\.\d+)?))?\)$/,
+    );
+    if (!match) throw new Error(`Invalid color format: ${value}`);
+
+    const [, r, g, b] = match.map(Number);
+    this.red = r;
+    this.green = g;
+    this.blue = b;
+    this._modifiedKeys.add("color");
+  }
+
+  get color(): string {
+    return `rgba(${this.red}, ${this.green}, ${this.blue}, 1)`;
+  }
+
+  set brightness(value: number) {
+    this.setLightingComponent("brightness", value, 0x00, 0x03);
+  }
+  get brightness(): number {
+    return this.config.lighting.brightness;
+  }
+
+  set speed(value: number) {
+    this.setLightingComponent("speed", value, 0x01, 0x05);
+  }
+  get speed(): number {
+    return this.config.lighting.speed;
+  }
+
+  // -------------------------------------
+  // Helper
+  // -------------------------------------
+
+  private clamp(val: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, val));
+  }
+
+  private wasModified(...keys: string[]) {
+    return keys.some((key) => this._modifiedKeys.has(key));
+  }
+
+  public saveConfig() {
+    const configJson = JSON.stringify(this.config);
+    localStorage.setItem("kreoDeviceConfig", configJson);
+  }
+
+  public loadConfig() {
+    const configJson = localStorage.getItem("kreoDeviceConfig");
+    if (configJson) {
+      this.config = JSON.parse(configJson);
+    } else {
+      console.warn("No saved config found. Using default config");
+    }
+  }
+
+  static async connect(): Promise<KreoDevice> {
+    const devices = await navigator.hid.requestDevice({
+      filters: [{ vendorId: 0x248a }],
+    });
+
+    if (devices.length === 0) {
+      throw new Error("No device selected");
+    }
+
+    const device = devices[0];
+
+    if (device.opened) {
+      console.warn("Device already open. Closing before reconnect.");
+      await device.close();
+    }
+
+    try {
+      await device.open();
+      console.log("Device connected: ", device);
+    } catch (err) {
+      console.error("Failed to open device", err);
+      throw err;
+    }
+
+    return new KreoDevice(device);
+  }
+
+  public async close() {
+    this._device.removeEventListener("inputreport", this.handleInputReport);
+    await this._device.close();
+  }
+
+  private handleInputReport = (event: HIDInputReportEvent) => {
+    const { data } = event;
+
+    if (this.responseResolvers.length > 0) {
+      const resolver = this.responseResolvers.shift();
+      resolver?.(data);
+    } else {
+      this.responseQueue.push(data);
+    }
+
+    // const bytes = new Uint8Array(data.buffer);
+    // console.log(`Input report ${reportId}:`, bytes);
+  };
+
+  // -------------------------------------
+  // DATA-TRANSFER
+  // -------------------------------------
+
+  private waitForResponse(timeout = 5000): Promise<DataView> {
+    return new Promise((resolve, reject) => {
+      if (this.responseQueue.length > 0) {
+        return resolve(this.responseQueue.shift()!);
+      }
+
+      // const onReport = (event: HIDInputReportEvent) => {
+      //   clearTimeout(timer);
+      //   this._device.removeEventListener("inputreport", onReport);
+      //   resolve(event.data);
+      // };
+
+      // const timer = setTimeout(() => {
+      //   this._device.removeEventListener("inputreport", onReport);
+      //   reject(new Error("Timeout waiting for response"));
+      // }, timeout);
+
+      // this._device.addEventListener("inputreport", onReport);
+
+      const timer = setTimeout(() => {
+        const index = this.responseResolvers.indexOf(resolve);
+        if (index !== -1) this.responseResolvers.splice(index, 1);
+        reject(new Error("Timeout waiting for response"));
+      }, timeout);
+
+      this.responseResolvers.push((data) => {
+        clearTimeout(timer);
+        resolve(data);
+      });
+    });
+  }
+
+  private async sendData(packets: number[][]) {
+    for (const packet of packets) {
+      const data = new Uint8Array(32);
+      data.set(packet);
+      await this._device.sendReport(5, data);
+
+      try {
+        await this.waitForResponse();
+        // const response = await this.waitForResponse();
+        // console.log("Received response:", [...new Uint8Array(response.buffer)]);
+      } catch (err) {
+        console.warn("Timeout or error while waiting for response", err);
+      }
+    }
+  }
+
+  public async sendHeader(numHeaders: number = 1) {
+    const packets: number[][] = [[0x26, 0xfa, 0x46]];
+    for (let i = 0; i < numHeaders; i++) await this.sendData(packets);
+  }
+
+  public async sendFooter() {
+    const packets: number[][] = [
+      [0x57, 0xfa, 0x40, 0xf3, 0x04],
+      [0x48, 0xfa, 0x40, 0xf3, 0x01],
+      [0x49, 0xfa, 0x40, 0xf3, 0x02],
+      [0x53, 0xfa, 0x40, 0xf3, 0x08],
+      [0x5b, 0xfa, 0x40, 0xf3, 0x10],
+      [0x27, 0xfa, 0x46, 0x01],
+      [0x24, 0xfa, 0x48],
+    ];
+
+    await this.sendData(packets);
+  }
+
+  // -------------------------------------
+  // Packets
+  // -------------------------------------
+
+  private get packetsA(): number[][] {
+    return [
+      [
+        0xb9,
+        0xfa,
+        0x01,
+        0x00,
+        0x00,
+        0x13,
+        0xd1,
+        0x02,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        0x00,
+        this.config.moveLightOff,
+        this.config.sleepValue,
+        0x01,
+        0x01,
+        this.config.reportRate,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x1f,
+        this.config.activeDpiProfile,
+        this.config.activeEffect,
+      ],
+      [0x28, 0xfa, 0x01, 0x7f, 0x00, 0x01, 0xd3, 0x1a],
+    ];
+  }
+
+  private get packetsB(): number[][] {
+    return [
+      [0xb6, 0xfa, 0x03, 0x00, 0x00, 0x02, 0xd1, 0x0a],
+      [
+        0x8f,
+        0xfa,
+        0x03,
+        0x02,
+        0x00,
+        0x18,
+        0xd2,
+        ...this.config.buttons.left,
+        ...this.config.buttons.right,
+        ...this.config.buttons.middle,
+        ...this.config.buttons.back,
+        ...this.config.buttons.forward,
+        ...this.config.buttons.dpi,
+      ],
+      [0x67, 0xfa, 0x03, 0x1a, 0x00, 0x18, 0xd2],
+      [0x7f, 0xfa, 0x03, 0x32, 0x00, 0x18, 0xd2],
+      [
+        0x57, 0xfa, 0x03, 0x4a, 0x00, 0x18, 0xd2, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8b,
+        0x00, 0x00, 0x00, 0x8c,
+      ],
+      [0x53, 0xfa, 0x03, 0x62, 0x00, 0x04, 0xd2, 0xff, 0xff, 0xff, 0xff],
+      [0x36, 0xfa, 0x03, 0x7f, 0x00, 0x01, 0xd3, 0x1a],
+    ];
+  }
+
+  private get packetsC(): number[][] {
+    const packets: number[][] = [];
+
+    // Header
+    packets.push([0xa8, 0xfa, 0x02, 0x00, 0x00, 0x01, 0xd1, 0x06]);
+
+    const dpiBytes = [0xb2, 0xbf, 0xb8, 0x85, 0x8e, 0x8b];
+
+    this.config.dpiProfiles.slice(0, 6).forEach((profile, index) => {
+      const packet = [
+        dpiBytes[index],
+        0xfa,
+        0x02,
+        0x01 + index * 5,
+        0x00,
+        0x05,
+        0xd2,
+        profile.enabled,
+        profile.dpi & 0xff,
+        (profile.dpi >> 8) & 0xff,
+        profile.dpi & 0xff,
+        (profile.dpi >> 8) & 0xff,
+      ];
+      packets.push(packet);
+    });
+
+    // Footer?
+    packets.push(
+      [0x94, 0xfa, 0x02, 0x1f, 0x00, 0x05, 0xd2],
+      [0x91, 0xfa, 0x02, 0x24, 0x00, 0x05, 0xd2],
+      [0x29, 0xfa, 0x02, 0x7f, 0x00, 0x01, 0xd3, 0x1a],
+    );
+
+    return packets;
+  }
+
+  private get packetsD(): number[][] {
+    return [
+      [
+        0x81,
+        0xfa,
+        0x04,
+        0x00,
+        0x00,
+        0x18,
+        0xd1,
+        0x80,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x80,
+        this.config.lighting.red,
+        this.config.lighting.green,
+        this.config.lighting.blue,
+        0x01,
+        0x00,
+        0x02,
+        this.config.lighting.brightness,
+        0x80,
+        0x00,
+        0xff,
+        0xff,
+        0x01,
+        0x05,
+        0x04,
+        0x03,
+      ],
+      [
+        0x66, 0xfa, 0x04, 0x18, 0x00, 0x18, 0xd2, 0x80, 0x00, 0x00, 0x00, 0x01,
+        0x05, 0x01, 0x03, 0x80, 0x00, 0x00, 0x00, 0x01, 0x05, 0x08, 0x03, 0x80,
+        0x00, 0x00, 0x00, 0x05, 0x05, 0x01, 0x03,
+      ],
+      [
+        0x7e, 0xfa, 0x04, 0x30, 0x00, 0x18, 0xd2, 0x80, 0x00, 0x00, 0x00, 0x07,
+        0x00, 0x00, 0x03, 0x80, 0x00, 0x00, 0x00, 0x06, 0x05, 0x00, 0x03, 0x80,
+        0x00, 0x00, 0x00, 0x08, 0x05, 0x00, 0x03,
+      ],
+      [
+        0x46,
+        0xfa,
+        0x04,
+        0x48,
+        0x00,
+        0x08,
+        0xd2,
+        0x80,
+        0x00,
+        0x00,
+        0x00,
+        0x09,
+        this.config.lighting.speed,
+        0x00,
+        0x03,
+      ],
+      [0x05, 0x37, 0xfa, 0x04, 0x7f, 0x00, 0x01, 0xd3, 0x1a],
+    ];
+  }
+
+  // -------------------------------------
+  // Update
+  // -------------------------------------
+
+  async sendUpdates() {
+    const packetsToSend: number[][] = [];
+
+    if (
+      this.wasModified(
+        "reportRate",
+        "activeDpiProfile",
+        "sleepValue",
+        "moveLightOff",
+        "activeEffect",
+      )
+    ) {
+      const packet = this.packetsA;
+      // console.log("Updating packet A");
+      packetsToSend.push(...packet);
+    }
+
+    if (this.wasModified("left", "right", "middle", "forward", "back", "dpi")) {
+      // console.log("Updating packet B");
+      packetsToSend.push(...this.packetsB);
+    }
+
+    if (this.wasModified("dpiProfiles")) {
+      // console.log("Updating packet C");
+      packetsToSend.push(...this.packetsC);
+    }
+
+    if (this.wasModified("red", "green", "blue", "brightness", "speed")) {
+      // console.log("Updating packet D");
+      packetsToSend.push(...this.packetsD);
+    }
+
+    if (packetsToSend.length > 0) {
+      await this.sendHeader(3);
+      await this.sendData(packetsToSend);
+      await this.sendFooter();
+      this._modifiedKeys.clear();
+    }
+  }
+
+  parseBatteryResponse(data: Uint8Array): number | null {
+    if (
+      data[0] === 0x05 &&
+      data[1] === 0x43 &&
+      data[2] === 0xfa &&
+      data[3] === 0x48
+    ) {
+      const batteryLevel = data[4];
+      return batteryLevel <= 100 ? batteryLevel : null; // Sanity check
+    }
+    return null;
+  }
+
+  public async getBatteryLevel(): Promise<number> {
+    const requestPacket = new Uint8Array(32);
+    requestPacket.set([0x24, 0xfa, 0x48]);
+    await this._device.sendReport(0x05, requestPacket);
+
+    const response = await this.waitForResponse();
+    const bytes = new Uint8Array(
+      response.buffer,
+      response.byteOffset,
+      response.byteLength,
+    );
+
+    if (bytes[1] !== 0xfa || bytes[2] !== 0x48) {
+      throw new Error("Unexpected response to battery query");
+    }
+
+    const batteryLevelRaw = bytes[3];
+    const batteryLevel = Math.round((batteryLevelRaw * 100) / 255);
+
+    return batteryLevel;
+  }
+}
