@@ -1,6 +1,6 @@
 import { Box, Button, Flex, Text } from "@chakra-ui/react";
 import { Sidebar } from "./components/Sidebar";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { RootState } from "./store";
 import { setCurrentDevice } from "./store/slices/devicesSlice";
@@ -66,11 +66,22 @@ function App() {
     { id: "keymapping", label: "Keymapping", icon: FiKey },
   ];
 
+  const joke = useMemo(() => {
+    const jokes = [
+      "Star Wars sequel trilogy does not exist. It’s just a bad dream.",
+      "Some say Luke Skywalker died in The Last Jedi. Others say the writers did.",
+      "The Rise of Skywalker was so bad, even Jar Jar walked out.",
+      "How does Darth Vader like his eggs? On the dark side.",
+      "Order 66: when Ctrl+C and Ctrl+V go too far.",
+    ];
+    return jokes[Math.floor(Math.random() * jokes.length)];
+  }, []);
+
   return (
     <Flex direction="column" minH="100vh" bg="gray.800" color="white">
       <Box bg="purple.400" px={4} py={1}>
         <Text fontWeight="bold" fontSize={"2xl"}>
-          Free-o
+          Pegasus WebHID
         </Text>
       </Box>
 
@@ -110,7 +121,7 @@ function App() {
       </Flex>
 
       <Box bg="purple.400" px={4} py={1}>
-        <Text>Star Wars sequel trilogy does not exist.</Text>
+        <Text>{joke}</Text>
       </Box>
     </Flex>
   );
