@@ -43,10 +43,9 @@ export function Sidebar({
           bg={"purple.400"}
           onClick={async () => {
             await device.sendUpdates();
-            console.log("Updated minama");
           }}
         >
-          Save Change
+          Save Changes
         </Button>
       </Stack>
     </Box>

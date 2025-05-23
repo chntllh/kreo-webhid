@@ -44,7 +44,9 @@ export const DeviceProvider = ({ children }: { children: React.ReactNode }) => {
             const kreo = new KreoDevice(hidDevice);
             setDevice(kreo);
           } else {
-            console.log("Reusing existing KreoDevice instance");
+            if (import.meta.env.MODE === "development") {
+              console.log("Reusing existing KreoDevice instance");
+            }
             setDevice(KreoDevice.instance);
           }
         }

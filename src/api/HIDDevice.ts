@@ -121,7 +121,9 @@ export class KreoDevice {
 
   static set instance(device: KreoDevice | null) {
     if (device && this._instance) {
-      console.warn("Attempt to overwrite existing KreoDevice instance");
+      if (import.meta.env.MODE === "development") {
+        console.warn("Attempt to overwrite existing KreoDevice instance");
+      }
       return;
     }
     this._instance = device;
@@ -139,14 +141,14 @@ export class KreoDevice {
     KreoDevice.instance = this;
 
     if (!this._inputListenerBound) {
-      console.log("Registering inputreport handler");
+      if (import.meta.env.MODE === "development") {
+        console.log("Registering inputreport handler");
+      }
       this._device.addEventListener("inputreport", this.handleInputReport);
       this._inputListenerBound = true;
       this.loadConfig();
     }
   }
-
-  private debug = true;
 
   private _modifiedKeys = new Set<string>();
 
@@ -207,7 +209,7 @@ export class KreoDevice {
       this.responseQueue.push(data);
     }
 
-    if (this.debug) {
+    if (import.meta.env.MODE === "development") {
       const hexBytes = Array.from(bytes).map((b) =>
         b.toString(16).padStart(2, "0"),
       );
@@ -244,7 +246,9 @@ export class KreoDevice {
     await new Promise((r) => setTimeout(r, 200));
     await device.open();
 
-    console.log("Device connected: ", device);
+    if (import.meta.env.MODE === "development") {
+      console.log("Device connected: ", device);
+    }
     return new KreoDevice(device);
   }
 
@@ -263,7 +267,7 @@ export class KreoDevice {
     const configJson = localStorage.getItem("kreoDeviceConfig");
     if (configJson) {
       this.config = JSON.parse(configJson);
-    } else {
+    } else if (import.meta.env.MODE === "development") {
       console.warn("No saved config found. Using default config");
     }
   }
@@ -647,7 +651,9 @@ export class KreoDevice {
   public async sendHeader(numHeaders: number = 1) {
     const packets: number[][] = [[0x26, 0xfa, 0x46]];
 
-    console.log("sending header");
+    if (import.meta.env.MODE === "development") {
+      console.log("sending header");
+    }
 
     for (let i = 0; i < numHeaders; i++) await this.sendData(packets);
   }
@@ -663,7 +669,9 @@ export class KreoDevice {
       [0x24, 0xfa, 0x48],
     ];
 
-    console.log("sending footer");
+    if (import.meta.env.MODE === "development") {
+      console.log("sending footer");
+    }
 
     await this.sendData(packets);
   }
@@ -845,7 +853,9 @@ export class KreoDevice {
   async sendUpdates() {
     const packetsToSend: number[][] = [];
 
-    console.log(this._modifiedKeys);
+    if (import.meta.env.MODE === "development") {
+      console.log(this._modifiedKeys);
+    }
 
     if (
       this.wasModified(
@@ -857,29 +867,39 @@ export class KreoDevice {
       )
     ) {
       const packet = this.packetsA;
-      console.log("Updating packet A");
+      if (import.meta.env.MODE === "development") {
+        console.log("Updating packet A");
+      }
       packetsToSend.push(...packet);
     }
 
     if (this.wasModified("left", "right", "middle", "forward", "back", "dpi")) {
-      console.log("Updating packet B");
+      if (import.meta.env.MODE === "development") {
+        console.log("Updating packet B");
+      }
       packetsToSend.push(...this.packetsB);
     }
 
     if (this.wasModified("dpiProfiles")) {
-      console.log("Updating packet C");
+      if (import.meta.env.MODE === "development") {
+        console.log("Updating packet C");
+      }
       packetsToSend.push(...this.packetsC);
     }
 
     if (
       this.wasModified("red", "green", "blue", "brightness", "speed", "color")
     ) {
-      console.log("Updating packet D");
+      if (import.meta.env.MODE === "development") {
+        console.log("Updating packet D");
+      }
       packetsToSend.push(...this.packetsD);
     }
 
     if (packetsToSend.length > 0) {
-      console.log(packetsToSend);
+      if (import.meta.env.MODE === "development") {
+        console.log(packetsToSend);
+      }
       await this.sendHeader(3);
       await this.sendData(packetsToSend);
       await this.sendFooter();
